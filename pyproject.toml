@@ -1,0 +1,19 @@
+[project]
+name = "document-query-engine"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bs4>=0.0.2",
+    "chromadb>=1.5.5",
+    "langchain>=1.2.15",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.4.1",
+    "langchain-core>=1.2.25",
+    "langchain-huggingface>=1.2.1",
+    "langchain-ollama>=1.1.0",
+    "lxml>=6.0.2",
+    "requests>=2.33.1",
+    "sentence-transformers>=5.3.0",
+]

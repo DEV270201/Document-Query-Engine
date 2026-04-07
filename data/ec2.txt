@@ -1,0 +1,19 @@
+Amazon EC2 (Elastic Compute Cloud) is a core Infrastructure-as-a-Service (IaaS) offering from AWS that provides resizable compute capacity in the cloud through virtual machines known as instances. 
+Its primary purpose is to eliminate the need for organizations to invest in and maintain physical servers, enabling rapid provisioning, scalability, and flexibility in running applications. 
+EC2 supports a wide range of workloads including web hosting, enterprise applications, big data processing, machine learning, and high-performance computing.
+EC2 instances are highly configurable, allowing users to choose from a variety of Amazon Machine Images (AMIs), which are preconfigured templates containing operating systems (such as Linux or Windows) and optional application software. 
+Users can select instance types categorized into families such as General Purpose (balanced resources), Compute Optimized (high CPU performance), Memory Optimized (large RAM capacity), Storage Optimized (high disk throughput), and Accelerated Computing (GPU-based workloads). 
+Each instance type varies in CPU, memory, storage, and networking capabilities.
+Networking in EC2 is managed through Amazon Virtual Private Cloud (VPC), allowing users to launch instances within isolated virtual networks, configure IP addressing, subnets, route tables, and gateways. 
+Security is enforced using Security Groups (stateful firewalls controlling inbound/outbound traffic) and Network ACLs (stateless filtering at the subnet level). 
+EC2 also supports Elastic IP addresses, which are static public IPv4 addresses that can be remapped between instances.
+
+Storage options include Amazon Elastic Block Store (EBS) for persistent block storage volumes, instance store (ephemeral storage physically attached to the host machine), and integration with object storage via Amazon S3. 
+EBS volumes support different performance tiers such as SSD-backed volumes for low latency and HDD-backed volumes for throughput-intensive workloads. Snapshots can be taken for backup and disaster recovery.
+EC2 provides high availability and fault tolerance through features like Availability Zones (isolated data centers within a region), Auto Scaling groups (which automatically adjust the number of instances based on demand or health checks), and Elastic Load Balancing (which distributes incoming traffic across multiple instances). 
+Monitoring is handled through Amazon CloudWatch, which collects metrics, logs, and triggers alarms.
+Additional features include placement groups for optimizing instance placement (cluster, spread, partition strategies), hibernation for pausing and resuming instances, and dedicated hosts or instances for compliance requirements. 
+EC2 also integrates with IAM (Identity and Access Management) for secure access control using roles and policies.
+The pricing model for EC2 is flexible and includes several options: On-Demand pricing (pay per use with no commitment), Reserved Instances (long-term commitments with significant discounts), Savings Plans (flexible pricing based on usage commitment), and Spot Instances (deep discounts for unused capacity with the possibility of interruption). 
+Costs are influenced by instance type, operating system, region, usage duration, storage, and data transfer. Additional charges may apply for premium features such as detailed monitoring or advanced networking.
+    

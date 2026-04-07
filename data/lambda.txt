@@ -1,0 +1,13 @@
+AWS Lambda is a serverless compute service that allows developers to run code in response to events without provisioning or managing servers.
+Its primary purpose is to abstract away infrastructure management, enabling developers to focus solely on writing and deploying code while AWS handles scaling, availability, and execution.
+Lambda operates on an event-driven model, where functions are triggered by events from various AWS services such as S3 (file uploads), API Gateway (HTTP requests), DynamoDB (database changes), CloudWatch (scheduled events), and more. 
+Each function runs in a stateless execution environment, meaning no data is retained between executions unless stored externally.
+Lambda supports multiple programming languages, including Python, Node.js, Java, Go, Ruby, and .NET, and allows custom runtimes. Functions are deployed as packages containing code and dependencies, and configuration includes memory allocation, timeout settings, and environment variables. Memory allocation directly impacts CPU and network performance.
+A key feature of Lambda is automatic scaling, where the service can handle a few requests per day or thousands per second without manual intervention. Concurrency controls allow limiting or reserving execution capacity. Lambda ensures high availability by running functions across multiple availability zones.
+
+Lambda integrates deeply with the AWS ecosystem, enabling microservices architectures, real-time file processing, stream processing, and backend APIs. It can be combined with API Gateway to create fully serverless web applications or used with Step Functions for orchestrating workflows.
+Advanced features include Lambda Layers (for sharing code across functions), provisioned concurrency (to reduce cold start latency), and support for container images (up to 10 GB). 
+Monitoring and logging are handled through CloudWatch Logs and metrics, while AWS X-Ray provides distributed tracing for debugging and performance analysis.
+Security is managed through IAM roles assigned to Lambda functions, ensuring least-privilege access to other AWS resources. Lambda also runs code in isolated environments for enhanced security.
+The pricing model is based on the number of requests and execution duration (measured in milliseconds), as well as the amount of memory allocated. Additional charges may apply for provisioned concurrency. 
+A free tier is available, offering a baseline number of requests and compute time per month, making Lambda highly cost-effective for intermittent or unpredictable workloads.
