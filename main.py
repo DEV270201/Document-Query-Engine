@@ -1,5 +1,5 @@
 from langchain_community.document_loaders import TextLoader, PyPDFLoader  # type: ignore
-from langchain_text_splitters import CharacterTextSplitter # type: ignore
+from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter # type: ignore
 from langchain_huggingface import HuggingFaceEmbeddings # type: ignore
 from pathlib import Path as path
 from langchain_chroma import Chroma # type: ignore
@@ -125,8 +125,10 @@ class ResponseGenerator:
 
     def generate_response(self, query, context):
         if not context:
-            print("Sorry, cannot process the request without context ....")
-            return
+            raise ValueError("Sorry, cannot process the request without context ....")
+        
+        if not self.llm:
+            raise ValueError("LLM not connected ....")
         
         context_text = "\n\n".join([chunk.page_content for chunk in context])
 
@@ -143,21 +145,40 @@ class ResponseGenerator:
         Answer:"""
 
         prompt = ChatPromptTemplate.from_template(template)
-        
-        # 3. Create a simple chain
-        chain = prompt | self.llm | StrOutputParser()
-        
-        # 4. Generate the response
-        return chain.invoke({"context": context_text, "question": query})
+
+        try:
+            # 3. Create a simple chain
+            chain = prompt | self.llm | StrOutputParser()
+            # 4. Generate the response
+            for chunk in chain.stream({"context": context_text, "question": query}):
+                print(chunk, end="", flush=True)
+        except Exception as e:
+            print("\n")
+            print(f"Failure | {e}")
+        return
     
 
-def get_character_splitter(seperator_="\n\n", chunk_size_=500, chunk_overlap_=200):
-    return CharacterTextSplitter(
-    separator=seperator_,
-    chunk_size=chunk_size_,     # Maximum characters per chunk
-    chunk_overlap=chunk_overlap_,   # Overlap between consecutive chunks
-    length_function=len
-) 
+class TextSpitter:
+    def __init__(self):
+        self.name="Text splitter class"
+
+    def get_character_splitter(self, seperator_="\n\n", chunk_size_=1000, chunk_overlap_=200):
+        return CharacterTextSplitter(
+        separator=seperator_,
+        chunk_size=chunk_size_,     # Maximum characters per chunk
+        chunk_overlap=chunk_overlap_,   # Overlap between consecutive chunks
+        length_function=len
+    ) 
+
+    def get_recursive_splitter(self, seperator_=["\n\n", "\n", " ", ""], chunk_size_=800, chunk_overlap_=300):
+       return RecursiveCharacterTextSplitter(
+        separators=seperator_, 
+        chunk_size=chunk_size_,
+        chunk_overlap=chunk_overlap_,
+        length_function=len,
+        is_separator_regex=False,
+    ) 
+
 
 def get_loader(file_path: path):
     ext = file_path.suffix.lower()
@@ -171,14 +192,15 @@ def get_loader(file_path: path):
 
 
 def generate_embeddings(db_manager=None):
-    namespace = "aws_db"
+    namespace = "aws_db3"
     vector_db = db_manager.get_collection(collection_name=namespace)
 
     if vector_db is None:
         print("No vector storage initialized .... quitting the app")
         return
-
-    text_splitter = get_character_splitter(seperator_="\n", chunk_overlap_=100)
+    
+    splitter = TextSpitter()
+    text_splitter = splitter.get_character_splitter(seperator_="\n", chunk_overlap_=400)
 
     for file_path in data_dir.rglob("*"):
 
@@ -282,9 +304,9 @@ def main():
                     #generate the llm response
                     print("Generating final response ....")
                     llm_response = generator.generate_response(context=context_docs,query=user_query)
-                    print("\n--- AI RESPONSE ---")
-                    print(llm_response)
-                    print("-------------------\n")
+                    # print("\n--- AI RESPONSE ---")
+                    # print(llm_response)
+                    # print("-------------------\n")
                 except Exception as e:
                     print("Error: ", e)
                     print("\n")
