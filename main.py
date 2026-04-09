@@ -106,7 +106,14 @@ class Retriever:
             print(f"--- Reranked Chunk {i+1} ---")
             print(f"CHUNK: {chunk.page_content}") # Print snippet for brevity
             print(f"Metadata: {chunk.metadata}")
+            print(f"rerank score: {chunk.metadata['rerank_score']}")
             print("\n")
+        
+        # filtering out chunks which are of lower relevance in order to reduce hallucinations and provide crisp responses 
+        final_results = [chunk for chunk in final_results if chunk.metadata['rerank_score'] >= 0.4]
+
+        if len(final_results) == 0:
+             print(f"DEBUG | All chunks were filtered out (Top score was below 0.4). Sending empty context to LLM ....")
 
         return final_results
     
@@ -124,8 +131,8 @@ class ResponseGenerator:
         print(f"Successfully connected to Ollama model: {self.model_name}")
 
     def generate_response(self, query, context):
-        if not context:
-            raise ValueError("Sorry, cannot process the request without context ....")
+        # if not context:
+        #     raise ValueError("Sorry, cannot process the request without context ....")
         
         if not self.llm:
             raise ValueError("LLM not connected ....")
@@ -133,9 +140,10 @@ class ResponseGenerator:
         context_text = "\n\n".join([chunk.page_content for chunk in context])
 
         template = """
-        You are a technical AWS assistant. Use the provided context to answer the question. 
-        Do not add any fluff from your side. If the answer isn't in the context, honestly state that you don't know.
-        If an user expresses their interests, take that into account and form your response effectively
+You are a restricted document-query bot. 
+1. If the Context section below is EMPTY or does not contain the answer, you MUST say exactly: "Information not found in local docs."
+2. Do NOT use your own knowledge. 
+3. Do NOT provide external links which is not present in the context.
         
         Context:
         {context}
@@ -192,7 +200,7 @@ def get_loader(file_path: path):
 
 
 def generate_embeddings(db_manager=None):
-    namespace = "aws_db3"
+    namespace = "aws_dbr2"
     vector_db = db_manager.get_collection(collection_name=namespace)
 
     if vector_db is None:
@@ -200,7 +208,8 @@ def generate_embeddings(db_manager=None):
         return
     
     splitter = TextSpitter()
-    text_splitter = splitter.get_character_splitter(seperator_="\n", chunk_overlap_=400)
+    # text_splitter = splitter.get_character_splitter(seperator_="\n", chunk_overlap_=400)
+    text_splitter = splitter.get_recursive_splitter()
 
     for file_path in data_dir.rglob("*"):
 
@@ -316,3 +325,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# past_prompt = """
+#  You are a technical AWS assistant. Use the provided context to answer the question. 
+#         Do not add any fluff from your side. If the answer isn't in the context, honestly state that you don't know.
+#         If an user expresses their interests, take that into account and form your response effectively
+# """
+
+
+# relevant questions
+# h: [0.99, 0.99, 0.99]
+# l: [0.29, 0.08, 0.06, ]
+
+# non relevant
+# h: [3.744(-5), 3.74(-5), 3.74(-5), 0.145]
+# l: [3.733(-5), 3.72(-5), 3.72(-5), 3.72(-5)]
