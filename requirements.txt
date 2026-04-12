@@ -10,3 +10,5 @@ chromadb
 sentence_transformers
 langchain_chroma
 langchain_ollama
+pypdf
+pymupdf
