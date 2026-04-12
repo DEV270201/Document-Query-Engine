@@ -8,7 +8,8 @@ from sentence_transformers import CrossEncoder # type: ignore
 from langchain_ollama import ChatOllama # type: ignore
 from langchain_core.prompts import ChatPromptTemplate # type: ignore
 from langchain_core.output_parsers import StrOutputParser # type: ignore
-import re
+from langchain_core.documents import Document # type: ignore
+import json
 
 cwd = path.cwd()
 DATA_DIR = rf"{cwd}\resume"
@@ -34,6 +35,32 @@ class VectorStorageManager:
              embedding_function=self.embedding_model,
              persist_directory=self.db_path
         )
+    
+class ParentChunkStorageRetriever:
+    def __init__(self, storage_path=rf"{path.cwd()}\db\resume\parent_store.jsonl"):
+        self.storage_path = storage_path
+        self.data = self._load()
+    
+    def _load(self):
+        data = {}
+        p = path(self.storage_path)
+        if p.exists():
+            with open(p, 'r') as f:
+                for line in f:
+                    # {"id": "...", "text": "..."}
+                    entry = json.loads(line)
+                    data[entry['id']] = entry['text']
+        return data
+    
+    def save_parent(self, parent_id, text):
+        if parent_id not in self.data:
+            self.data[parent_id] = text
+            with open(self.storage_path, 'a') as f:
+                json.dump({"id": parent_id, "text": text}, f)
+                f.write('\n')
+
+    def get_parent(self, parent_id):
+        return self.data.get(parent_id, "")
 
 
 class EmbeddingsGenerator:
@@ -53,18 +80,16 @@ class EmbeddingsGenerator:
         )
 
 class Retriever:
-    def __init__(self, llm_model=None, db_manager:VectorStorageManager=None, reranker_model_name="BAAI/bge-reranker-base"):
+    def __init__(self, parent_store_retriever:ParentChunkStorageRetriever, llm_model=None, db_manager:VectorStorageManager=None, reranker_model_name="BAAI/bge-reranker-base"):
         self.llm_model=llm_model
         self.db_manager=db_manager
         self.reranker_model_name=reranker_model_name
+        self.parent_retriever=parent_store_retriever
         self.reranker=self._load_reranker_model()
 
-    
     def _load_reranker_model(self):
         print(f"Loading reranker model: {self.reranker_model_name}")
         return CrossEncoder(self.reranker_model_name, device='cpu')
-
-    
 
     def get_top_results(self, k:int=2, collection_name:str="aws_db", user_query:str=None):
         query = user_query.strip()
@@ -81,7 +106,7 @@ class Retriever:
         # stage 1: initial chunk retrieval 
         initial_recall = k*2
         print(f"Fetching top {initial_recall} candidate chunks....")
-        top_chunk_results = vector_db.similarity_search_with_score(query, k) # returns (chunk [page_content, metadata], similarity_score)
+        top_chunk_results = vector_db.similarity_search_with_score(query, initial_recall) # returns (chunk [page_content, metadata], similarity_score)
 
         for chunk,score in top_chunk_results:
             chunk.metadata['similarity_score'] = score
@@ -99,24 +124,42 @@ class Retriever:
             chunk.metadata["rerank_score"] = float(scores[i])
 
         reranked_results = sorted(top_chunk_results, key=lambda x: x[0].metadata["rerank_score"], reverse=True)
+        final_parent_chunks = []
+        seen_parent_ids = set()
 
-        # Return only the top 'k' requested
-        final_results = [result[0] for result in reranked_results]
+        for index, result_chunk in enumerate(reranked_results):
+            chunk = result_chunk[0]
 
-        for i, chunk in enumerate(final_results):
-            print(f"--- Reranked Chunk {i+1} ---")
+            print(f"--- Reranked Chunk {index+1} ---")
             print(f"CHUNK: {chunk.page_content}") # Print snippet for brevity
             print(f"Metadata: {chunk.metadata}")
             print(f"rerank score: {chunk.metadata['rerank_score']}")
             print("\n")
-        
-        # filtering out chunks which are of lower relevance in order to reduce hallucinations and provide crisp responses 
-        final_results = [chunk for chunk in final_results if chunk.metadata['rerank_score'] >= 0.2]
 
-        if len(final_results) == 0:
-             print(f"DEBUG | All chunks were filtered out (Top score was below 0.4). Sending empty context to LLM ....")
+            # filtering out chunks which are of lower relevance in order to reduce hallucinations and provide crisp responses 
+            if chunk.metadata['rerank_score'] >= 0.2:
+                p_id = chunk.metadata.get("parent_id")
+                if p_id:
+                    # If we haven't already added this parent's context
+                    if p_id not in seen_parent_ids:
+                        # swap the child text for the full Parent text
+                        parent_text = self.parent_retriever.get_parent(parent_id=p_id)
+                        if parent_text:
+                            chunk.page_content = parent_text
+                            final_parent_chunks.append(chunk)
+                            seen_parent_ids.add(p_id)
+                else:
+                    # Fallback for chunks without parents
+                    final_parent_chunks.append(chunk)
 
-        return final_results
+            # Stop once we have enough parent context for the LLM
+            if len(final_parent_chunks) >= k:
+                break
+
+        if len(final_parent_chunks) == 0:
+             print(f"DEBUG | All chunks were filtered out (Top score was below 0.2). Sending empty context to LLM ....")
+
+        return final_parent_chunks
     
 
 class ResponseGenerator:
@@ -199,7 +242,7 @@ def get_loader(file_path: path):
         return None
     
 
-def comprehend_section(chunk, SECTIONS:set, current_section:list):
+# def comprehend_section(chunk, SECTIONS:set, current_section:list):
     for line in chunk.page_content.split("\n"):
         header = line.strip().lower()
         if header in SECTIONS and current_section[0] != header:
@@ -212,7 +255,7 @@ def comprehend_section(chunk, SECTIONS:set, current_section:list):
     current_section.append(last_section)
     return chunk
  
-def generate_embeddings(db_manager=None):
+def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, db_manager=None):
     namespace = "resume"
     vector_db = db_manager.get_collection(collection_name=namespace)
 
@@ -221,8 +264,11 @@ def generate_embeddings(db_manager=None):
         return
     
     splitter = TextSpitter()
-    # text_splitter = splitter.get_character_splitter(seperator_="\n", chunk_overlap_=400)
-    text_splitter = splitter.get_recursive_splitter()
+    # using parent-child retriever system for better performing RAG system
+    # parent chunk spliiter
+    parent_splitter = splitter.get_recursive_splitter(chunk_size_=1500, chunk_overlap_=350)
+    # child chunk splitter
+    child_splitter = splitter.get_recursive_splitter()
 
     for file_path in data_dir.rglob("*.pdf"):
 
@@ -238,8 +284,8 @@ def generate_embeddings(db_manager=None):
 
         print(f"Name: {file_name} | Generating documents lazily ...")
         #1. parsing the document
-        SECTIONS = set(["summary", "education", "professional experience", "experience", "projects", "leadership", "certifications", "technical skills", "skills", "leadership & certifications"])
-        current_section = ["general"]
+        # SECTIONS = set(["summary", "education", "professional experience", "experience", "projects", "leadership", "certifications", "technical skills", "skills", "leadership & certifications"])
+        # current_section = ["general"]
 
         try:
             for doc_index, doc in enumerate(loader.lazy_load()):  
@@ -250,35 +296,48 @@ def generate_embeddings(db_manager=None):
                     "extension": file_path.suffix.lower(),
                     "doc_type" : "Theory"
                 }
-                doc.metadata.update(metadata)
+
+                parents = parent_splitter.split_documents([doc])
                 current_batch = []
 
-                #2. splitting up the documents
-                print(f"Name: {file_name} | Splitting up the documents...")
-                chunks = text_splitter.split_documents([doc])
+                for p_idx, p_doc in enumerate(parents):
+                        parent_id = f"{file_name}_{doc_index}_{p_idx}"
+                        parent_store_retriever.save_parent(parent_id=parent_id, text=p_doc.page_content) #storing the parent chunk in the json file .... used for providing context to the LLM
 
-              
+                        #2. splitting up the documents
+                        print(f"Name: {file_name} | Splitting up the documents...")
+                        children = child_splitter.split_text(p_doc.page_content)
 
-                for index, chunk in enumerate(chunks):
-                    chunk = comprehend_section(chunk, SECTIONS, current_section)
-                    # 3. Embedding and storing the documents
-                    current_batch.append(chunk)
-                    if len(current_batch) >= batch_size:
-                        print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                        for c_idx, child_text in enumerate(children):
+                            # chunk = comprehend_section(chunk, SECTIONS, current_section)
+                            child_doc = Document(
+                                    page_content=child_text,
+                                    metadata={
+                                        **doc.metadata,
+                                        "parent_id": parent_id, 
+                                        "child_index": c_idx,
+                                        "parent_idx": p_idx
+                                    }
+                                )
+                            
+                            # 3. Embedding and storing the documents
+                            current_batch.append(child_doc)
+                            if len(current_batch) >= batch_size:
+                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                                try:
+                                    vector_db.add_documents(current_batch)
+                                except Exception as error:
+                                    print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
+                                finally:
+                                    current_batch = []
+                        
                         try:
-                            vector_db.add_documents(current_batch)
+                            if current_batch:
+                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                                vector_db.add_documents(current_batch)
+                                current_batch = []
                         except Exception as error:
-                            print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Start chunk index: {index - len(current_batch) + 1} | Batch size: {len(current_batch)}")
-                        finally:
-                            current_batch = []
-                
-                try:
-                    if current_batch:
-                        print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
-                        vector_db.add_documents(current_batch)
-                        current_batch = []
-                except Exception as error:
-                        print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Start chunk index: {len(chunks) - len(current_batch)} | Batch size: {len(current_batch)}")
+                                print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
             
             print(f"Success | Name: {file_name} | Embeddings stored successfully!")
         
@@ -305,10 +364,11 @@ def main():
     })
     print("Embedding model initialized....")
     db_manager = VectorStorageManager(embedding_model=embeddings.generator)
-    print("Loading retrieval class ....")
-    retrieve = Retriever(db_manager=db_manager)
     print("Retriever class loaded successfully!")
     generator = ResponseGenerator(model_name="phi3:latest")
+    parent_store_retriever = ParentChunkStorageRetriever()
+    print("Loading retrieval class ....")
+    retrieve = Retriever(parent_store_retriever=parent_store_retriever,db_manager=db_manager)
 
     while(True):
         print("Choose Options: ")
@@ -320,7 +380,7 @@ def main():
 
         match user_input:
             case 1:
-                generate_embeddings(db_manager)
+                generate_embeddings(parent_store_retriever, db_manager)
             case 2:
                 try:
                     user_query = input("Enter your query: ")
