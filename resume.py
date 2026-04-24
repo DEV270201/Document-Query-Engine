@@ -1,5 +1,5 @@
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, PyMuPDFLoader  # type: ignore
-from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter # type: ignore
+from langchain_text_splitters import TextSplitter, CharacterTextSplitter, RecursiveCharacterTextSplitter # type: ignore
 from langchain_huggingface import HuggingFaceEmbeddings # type: ignore
 from pathlib import Path as path
 from langchain_chroma import Chroma # type: ignore
@@ -9,7 +9,9 @@ from langchain_ollama import ChatOllama # type: ignore
 from langchain_core.prompts import ChatPromptTemplate # type: ignore
 from langchain_core.output_parsers import StrOutputParser # type: ignore
 from langchain_core.documents import Document # type: ignore
+from transformers import AutoTokenizer # type: ignore
 import json
+import re
 
 cwd = path.cwd()
 DATA_DIR = rf"{cwd}\resume"
@@ -69,15 +71,74 @@ class EmbeddingsGenerator:
         self.model_args = model_args
         self.encode_args = encode_args
         self.generator = None
+        self.tokenizer = None
         self._load_model()
 
-    
     def _load_model(self):
         self.generator = HuggingFaceEmbeddings(
             model_name=self.model_name,
             model_kwargs=self.model_args,
             encode_kwargs=self.encode_args
         )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+    
+    def count_tokens(self,text: str) -> int:
+        return len(self.tokenizer.encode(text))
+    
+    def get_character_splitter(self, seperator_="\n\n", chunk_size_=1000, chunk_overlap_=200):
+        return CharacterTextSplitter(
+        separator=seperator_,
+        chunk_size=chunk_size_,     # Maximum characters per chunk
+        chunk_overlap=chunk_overlap_,   # Overlap between consecutive chunks
+        length_function=self.count_tokens
+    ) 
+
+    def get_recursive_splitter(self, seperator_=["\n\n", "\n", " ", ""], chunk_size_=450, chunk_overlap_=200):
+       return RecursiveCharacterTextSplitter(
+        separators=seperator_, 
+        chunk_size=chunk_size_,
+        chunk_overlap=chunk_overlap_,
+        length_function=self.count_tokens,
+        is_separator_regex=False,
+    ) 
+    
+class ResumeStructuralSplitter(TextSplitter):
+    
+    SECTION_HEADERS = re.compile(
+        r'\n(Summary|Education|Professional Experience|Projects|'
+        r'Leadership & Certifications|Leadership|Certifications|'
+        r'Technical Skills|Skills)\n',
+        re.IGNORECASE
+    )
+    
+    # Matches position before "Job Title | Company, Location"
+    SUB_HEADERS = re.compile(r'\n(?=.+? \| .+?(?:,|\n))')
+
+    def split_text(self, text: str) -> list[str]:
+        chunks = []
+        
+        sections = self.SECTION_HEADERS.split(text)
+        it = iter(sections)
+        
+        preamble = next(it)
+        if preamble.strip():
+            chunks.append(preamble.strip())
+        
+        for header, content in zip(it, it):
+            section_text = f"{header}\n{content.strip()}"
+            
+            if header.strip() in ("Professional Experience", "Projects"):
+                sub_chunks = self.SUB_HEADERS.split(section_text)
+                for sc in sub_chunks:
+                    if sc.strip():
+                        # carries parent section name into every sub-chunk
+                        chunks.append(f"This section talks about: [{header.strip()}]\n{sc.strip()}")
+            else:
+
+                chunks.append(f"This section talks about: {section_text}")
+        
+        return chunks
 
 class Retriever:
     def __init__(self, parent_store_retriever:ParentChunkStorageRetriever, llm_model=None, db_manager:VectorStorageManager=None, reranker_model_name="BAAI/bge-reranker-base"):
@@ -208,29 +269,7 @@ You are a restricted document-query bot.
             print("\n")
             print(f"Failure | {e}")
         return
-    
-
-class TextSpitter:
-    def __init__(self):
-        self.name="Text splitter class"
-
-    def get_character_splitter(self, seperator_="\n\n", chunk_size_=1000, chunk_overlap_=200):
-        return CharacterTextSplitter(
-        separator=seperator_,
-        chunk_size=chunk_size_,     # Maximum characters per chunk
-        chunk_overlap=chunk_overlap_,   # Overlap between consecutive chunks
-        length_function=len
-    ) 
-
-    def get_recursive_splitter(self, seperator_=["\n\n", "\n", " ", ""], chunk_size_=450, chunk_overlap_=200):
-       return RecursiveCharacterTextSplitter(
-        separators=seperator_, 
-        chunk_size=chunk_size_,
-        chunk_overlap=chunk_overlap_,
-        length_function=len,
-        is_separator_regex=False,
-    ) 
-
+   
 
 def get_loader(file_path: path):
     ext = file_path.suffix.lower()
@@ -255,20 +294,19 @@ def get_loader(file_path: path):
     current_section.append(last_section)
     return chunk
  
-def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, db_manager=None):
-    namespace = "resume"
+def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embeddings: EmbeddingsGenerator, db_manager:VectorStorageManager=None):
+    namespace = "new_resume"
     vector_db = db_manager.get_collection(collection_name=namespace)
 
     if vector_db is None:
         print("No vector storage initialized .... quitting the app")
         return
     
-    splitter = TextSpitter()
     # using parent-child retriever system for better performing RAG system
     # parent chunk spliiter
-    parent_splitter = splitter.get_recursive_splitter(chunk_size_=1500, chunk_overlap_=350)
+    parent_splitter = ResumeStructuralSplitter()
     # child chunk splitter
-    child_splitter = splitter.get_recursive_splitter()
+    child_splitter = embeddings.get_recursive_splitter(chunk_size_=256, chunk_overlap_=50)
 
     for file_path in data_dir.rglob("*.pdf"):
 
@@ -289,10 +327,7 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, db_m
 
         try:
             for doc_index, doc in enumerate(loader.lazy_load()):  
-                metadata = {
-                    "name": file_name,
-                    "last_modified": datetime.now().isoformat(),
-                    "doc_index": doc_index,
+                doc_metadata = {
                     "extension": file_path.suffix.lower(),
                     "doc_type" : "Theory"
                 }
@@ -301,6 +336,9 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, db_m
                 current_batch = []
 
                 for p_idx, p_doc in enumerate(parents):
+                        print("=========")
+                        print("parent chunk: ", p_doc.page_content)
+                        print("=========")
                         parent_id = f"{file_name}_{doc_index}_{p_idx}"
                         parent_store_retriever.save_parent(parent_id=parent_id, text=p_doc.page_content) #storing the parent chunk in the json file .... used for providing context to the LLM
 
@@ -313,7 +351,8 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, db_m
                             child_doc = Document(
                                     page_content=child_text,
                                     metadata={
-                                        **doc.metadata,
+                                        **doc_metadata,
+                                        **p_doc.metadata,
                                         "parent_id": parent_id, 
                                         "child_index": c_idx,
                                         "parent_idx": p_idx
@@ -380,7 +419,7 @@ def main():
 
         match user_input:
             case 1:
-                generate_embeddings(parent_store_retriever, db_manager)
+                generate_embeddings(parent_store_retriever, embeddings, db_manager)
             case 2:
                 try:
                     user_query = input("Enter your query: ")
