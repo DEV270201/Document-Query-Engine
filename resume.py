@@ -12,6 +12,7 @@ from langchain_core.documents import Document # type: ignore
 from transformers import AutoTokenizer # type: ignore
 import json
 import re
+import uuid
 
 cwd = path.cwd()
 DATA_DIR = rf"{cwd}\resume"
@@ -113,7 +114,7 @@ class ResumeStructuralSplitter(TextSplitter):
     )
     
     # Matches position before "Job Title | Company, Location"
-    SUB_HEADERS = re.compile(r'\n(?=.+? \| .+?(?:,|\n))')
+    SUB_HEADERS = re.compile(r'\n(?=.+?\|.+?(?:,|\n))')
 
     def split_text(self, text: str) -> list[str]:
         chunks = []
@@ -122,21 +123,42 @@ class ResumeStructuralSplitter(TextSplitter):
         it = iter(sections)
         
         preamble = next(it)
-        if preamble.strip():
-            chunks.append(preamble.strip())
+        print("\n")
+        print("preamble:     ", preamble)
+        print("\n")
+
+        preamble = preamble.strip()
+
+        # the first chunk of the document will always contain the name of the person in case of resume 
+        candidate_name = preamble[:preamble.index('\n')]
+
+        print("Candidate Name: ", candidate_name)
+
+        if preamble:
+            chunks.append(preamble)
         
         for header, content in zip(it, it):
             section_text = f"{header}\n{content.strip()}"
             
             if header.strip() in ("Professional Experience", "Projects"):
                 sub_chunks = self.SUB_HEADERS.split(section_text)
-                for sc in sub_chunks:
+
+                for i, sc in enumerate(sub_chunks):
+                    if i == 0:
+                        continue
+
                     if sc.strip():
                         # carries parent section name into every sub-chunk
-                        chunks.append(f"This section talks about: [{header.strip()}]\n{sc.strip()}")
+                        chunks.append(
+                            f"Candidate: {candidate_name}\n"
+                            f"This section talks about: [{header.strip()}]\n"
+                            f"{sc.strip()}"
+                        )
             else:
-
-                chunks.append(f"This section talks about: {section_text}")
+                chunks.append(
+                    f"Candidate: {candidate_name}\n"
+                    f"This section talks about: {section_text}"
+                )
         
         return chunks
 
@@ -279,20 +301,24 @@ def get_loader(file_path: path):
         return TextLoader(str(file_path), encoding="utf-8")
     else:
         return None
-    
 
-# def comprehend_section(chunk, SECTIONS:set, current_section:list):
-    for line in chunk.page_content.split("\n"):
-        header = line.strip().lower()
-        if header in SECTIONS and current_section[0] != header:
-            current_section.append(header)
-        
-    last_section = current_section[-1]
-    all_sections = " and ".join(current_section)
-    chunk.page_content = f"This section describes about Devansh's : {all_sections} | {chunk.page_content}"
-    current_section.clear()
-    current_section.append(last_section)
-    return chunk
+def load_full_document(loader, file_name, file_path):
+    pages = loader.load()
+    # merge all the pages ..... in case of resume, this wont hurt since the resume are generally smaller in size
+    full_text = "\n".join([page.page_content for page in pages])
+    merged_doc = Document(
+        page_content=full_text,
+        metadata = {
+            "source": str(file_path),
+            "name": file_name,
+            "total_pages": len(pages),
+            "extension": file_path.suffix.lower(),
+            "doc_type" : "Resume"
+        }
+    )
+
+    return merged_doc
+
  
 def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embeddings: EmbeddingsGenerator, db_manager:VectorStorageManager=None):
     namespace = "new_resume"
@@ -308,7 +334,7 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
     # child chunk splitter
     child_splitter = embeddings.get_recursive_splitter(chunk_size_=256, chunk_overlap_=50)
 
-    for file_path in data_dir.rglob("*.pdf"):
+    for file_path in data_dir.rglob("tp_resume.pdf"):
 
         if not file_path.is_file():
             continue
@@ -322,16 +348,8 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
 
         print(f"Name: {file_name} | Generating documents lazily ...")
         #1. parsing the document
-        # SECTIONS = set(["summary", "education", "professional experience", "experience", "projects", "leadership", "certifications", "technical skills", "skills", "leadership & certifications"])
-        # current_section = ["general"]
-
         try:
-            for doc_index, doc in enumerate(loader.lazy_load()):  
-                doc_metadata = {
-                    "extension": file_path.suffix.lower(),
-                    "doc_type" : "Theory"
-                }
-
+                doc = load_full_document(loader=loader, file_name=file_name, file_path=file_path)
                 parents = parent_splitter.split_documents([doc])
                 current_batch = []
 
@@ -339,19 +357,40 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
                         print("=========")
                         print("parent chunk: ", p_doc.page_content)
                         print("=========")
-                        parent_id = f"{file_name}_{doc_index}_{p_idx}"
+                        parent_id = f"{file_name}_{uuid.uuid1()}_{p_idx}"
                         parent_store_retriever.save_parent(parent_id=parent_id, text=p_doc.page_content) #storing the parent chunk in the json file .... used for providing context to the LLM
+
+                        #every document will have candidate name in the first line and header in the second one (except the first parent doc because it would be just name and location etc)
+                        candidate_name=""
+                        header_info=""
+                        subheader_info=""
+
+                        if p_idx > 0:
+                            first = p_doc.index("\n")
+                            second = p_doc.index("\n", first+1)
+                            third = p_doc.index("\n", second+1)
+                            candidate_name = p_doc[:first]
+                            header_info = p_doc[first+1:second]
+
+                            if header_info.strip() in (r"*Experience", r"Projects"):
+                                subheader_info = p_doc[second+1:third]
 
                         #2. splitting up the documents
                         print(f"Name: {file_name} | Splitting up the documents...")
                         children = child_splitter.split_text(p_doc.page_content)
 
+                        full_context = f"{candidate_name}\n{header_info}\n{subheader_info}"
+
                         for c_idx, child_text in enumerate(children):
                             # chunk = comprehend_section(chunk, SECTIONS, current_section)
-                            child_doc = Document(
-                                    page_content=child_text,
+                             if not child_text.startswith("Candidate:"):
+                                child_text_with_context = f"{full_context}\n{child_text}" if full_context.strip() else child_text
+                             else:
+                                child_text_with_context = child_text
+                                 
+                             child_doc = Document(
+                                    page_content=child_text_with_context,
                                     metadata={
-                                        **doc_metadata,
                                         **p_doc.metadata,
                                         "parent_id": parent_id, 
                                         "child_index": c_idx,
@@ -360,25 +399,25 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
                                 )
                             
                             # 3. Embedding and storing the documents
-                            current_batch.append(child_doc)
-                            if len(current_batch) >= batch_size:
-                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
-                                try:
-                                    vector_db.add_documents(current_batch)
-                                except Exception as error:
-                                    print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
-                                finally:
-                                    current_batch = []
+                        #     current_batch.append(child_doc)
+                        #     if len(current_batch) >= batch_size:
+                        #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                        #         try:
+                        #             vector_db.add_documents(current_batch)
+                        #         except Exception as error:
+                        #             print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
+                        #         finally:
+                        #             current_batch = []
                         
-                        try:
-                            if current_batch:
-                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
-                                vector_db.add_documents(current_batch)
-                                current_batch = []
-                        except Exception as error:
-                                print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
+                        # try:
+                        #     if current_batch:
+                        #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                        #         vector_db.add_documents(current_batch)
+                        #         current_batch = []
+                        # except Exception as error:
+                        #         print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
             
-            print(f"Success | Name: {file_name} | Embeddings stored successfully!")
+                print(f"Success | Name: {file_name} | Embeddings stored successfully!")
         
         except Exception as e:
             print(f"Failure | Name: {file_name} | Document generation failed ... | Reason: {e}")
@@ -442,3 +481,62 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+    # this is my previous approach where i used to load one page at a time in order to reduce memory consumption 
+    # breaks when the resume is multi page due to lost context across headers
+    # for doc_index, doc in enumerate(loader.lazy_load()):  
+    #             print("doc_index: ", doc_index)
+    #             print("page_content: ", repr(doc.page_content))
+    #             doc_metadata = {
+    #                 "extension": file_path.suffix.lower(),
+    #                 "doc_type" : "Theory"
+    #             }
+
+    #             parents = parent_splitter.split_documents([doc])
+    #             current_batch = []
+
+    #             for p_idx, p_doc in enumerate(parents):
+    #                     print("=========")
+    #                     print("parent chunk: ", p_doc.page_content)
+    #                     print("=========")
+    #                     parent_id = f"{file_name}_{doc_index}_{p_idx}"
+    #                     parent_store_retriever.save_parent(parent_id=parent_id, text=p_doc.page_content) #storing the parent chunk in the json file .... used for providing context to the LLM
+
+    #                     #2. splitting up the documents
+    #                     print(f"Name: {file_name} | Splitting up the documents...")
+    #                     children = child_splitter.split_text(p_doc.page_content)
+
+    #                     for c_idx, child_text in enumerate(children):
+    #                         # chunk = comprehend_section(chunk, SECTIONS, current_section)
+    #                         child_doc = Document(
+    #                                 page_content=child_text,
+    #                                 metadata={
+    #                                     **doc_metadata,
+    #                                     **p_doc.metadata,
+    #                                     "parent_id": parent_id, 
+    #                                     "child_index": c_idx,
+    #                                     "parent_idx": p_idx
+    #                                 }
+    #                             )
+                            
+    #                         # 3. Embedding and storing the documents
+    #                     #     current_batch.append(child_doc)
+    #                     #     if len(current_batch) >= batch_size:
+    #                     #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+    #                     #         try:
+    #                     #             vector_db.add_documents(current_batch)
+    #                     #         except Exception as error:
+    #                     #             print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
+    #                     #         finally:
+    #                     #             current_batch = []
+                        
+    #                     # try:
+    #                     #     if current_batch:
+    #                     #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+    #                     #         vector_db.add_documents(current_batch)
+    #                     #         current_batch = []
+    #                     # except Exception as error:
+    #                     #         print(f"Failure | Name: {file_name} | Embeddings failed to store | Doc index: {doc_index} | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
+            
