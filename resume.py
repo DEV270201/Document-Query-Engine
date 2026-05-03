@@ -134,24 +134,24 @@ class ResumeStructuralSplitter(TextSplitter):
 
         print("Candidate Name: ", candidate_name)
 
-        if preamble:
-            chunks.append(preamble)
+        # if preamble:
+        #     chunks.append(preamble)
         
         for header, content in zip(it, it):
             section_text = f"{header}\n{content.strip()}"
             
-            if header.strip() in ("Professional Experience", "Projects"):
+            if re.search(r'experience|projects?', header, re.IGNORECASE):
                 sub_chunks = self.SUB_HEADERS.split(section_text)
 
                 for i, sc in enumerate(sub_chunks):
-                    if i == 0:
+                    if i == 0: #this would be the header itself
                         continue
 
                     if sc.strip():
                         # carries parent section name into every sub-chunk
                         chunks.append(
                             f"Candidate: {candidate_name}\n"
-                            f"This section talks about: [{header.strip()}]\n"
+                            f"This section talks about: {header.strip()}\n"
                             f"{sc.strip()}"
                         )
             else:
@@ -364,16 +364,19 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
                         candidate_name=""
                         header_info=""
                         subheader_info=""
+                        
+                        #because the first parent document will always contain the information of the candidate since we have designed the splitter that way
+                        #so skipping for that .... for now we arent adding that chunk in the vector db but will see later if we need it
+                        # if p_idx > 0:
 
-                        if p_idx > 0:
-                            first = p_doc.index("\n")
-                            second = p_doc.index("\n", first+1)
-                            third = p_doc.index("\n", second+1)
-                            candidate_name = p_doc[:first]
-                            header_info = p_doc[first+1:second]
+                        first = p_doc.page_content.index("\n")
+                        second = p_doc.page_content.index("\n", first+1)
+                        third = p_doc.page_content.index("\n", second+1)
+                        candidate_name = p_doc.page_content[:first]
+                        header_info = p_doc.page_content[first+1:second]
 
-                            if header_info.strip() in (r"*Experience", r"Projects"):
-                                subheader_info = p_doc[second+1:third]
+                        if re.search(r'experience|projects?', header_info, re.IGNORECASE):
+                            subheader_info = p_doc.page_content[second+1:third]
 
                         #2. splitting up the documents
                         print(f"Name: {file_name} | Splitting up the documents...")
@@ -383,39 +386,39 @@ def generate_embeddings(parent_store_retriever:ParentChunkStorageRetriever, embe
 
                         for c_idx, child_text in enumerate(children):
                             # chunk = comprehend_section(chunk, SECTIONS, current_section)
-                             if not child_text.startswith("Candidate:"):
-                                child_text_with_context = f"{full_context}\n{child_text}" if full_context.strip() else child_text
-                             else:
-                                child_text_with_context = child_text
-                                 
-                             child_doc = Document(
-                                    page_content=child_text_with_context,
-                                    metadata={
-                                        **p_doc.metadata,
-                                        "parent_id": parent_id, 
-                                        "child_index": c_idx,
-                                        "parent_idx": p_idx
-                                    }
-                                )
+                            if not child_text.startswith("Candidate:"):
+                               child_text_with_context = f"{full_context}\n{child_text}" if full_context.strip() else child_text
+                            else:
+                              child_text_with_context = child_text
+                                
+                            child_doc = Document(
+                                page_content=child_text_with_context,
+                                metadata={
+                                    **p_doc.metadata,
+                                    "parent_id": parent_id, 
+                                    "child_index": c_idx,
+                                    "parent_idx": p_idx
+                                }
+                            )
                             
                             # 3. Embedding and storing the documents
-                        #     current_batch.append(child_doc)
-                        #     if len(current_batch) >= batch_size:
-                        #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
-                        #         try:
-                        #             vector_db.add_documents(current_batch)
-                        #         except Exception as error:
-                        #             print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
-                        #         finally:
-                        #             current_batch = []
+                            current_batch.append(child_doc)
+                            if len(current_batch) >= batch_size:
+                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                                try:
+                                    vector_db.add_documents(current_batch)
+                                except Exception as error:
+                                    print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {c_idx - len(current_batch)} | Batch size: {len(current_batch)}")
+                                finally:
+                                    current_batch = []
                         
-                        # try:
-                        #     if current_batch:
-                        #         print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
-                        #         vector_db.add_documents(current_batch)
-                        #         current_batch = []
-                        # except Exception as error:
-                        #         print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
+                        try:
+                            if current_batch:
+                                print(f"Name: {file_name} | Pushing {len(current_batch)} chunks into {namespace} namespace...")
+                                vector_db.add_documents(current_batch)
+                                current_batch = []
+                        except Exception as error:
+                                print(f"Failure | Name: {file_name} | Embeddings failed to store | Parent chunk index: {p_idx} | Start index: {len(children) - len(current_batch)} | Batch size: {len(current_batch)}")
             
                 print(f"Success | Name: {file_name} | Embeddings stored successfully!")
         
